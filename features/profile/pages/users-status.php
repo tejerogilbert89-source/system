@@ -1,0 +1,24 @@
+<?php
+/** POST handler for suspending or reactivating an account. */
+Auth::requireRole(['admin']);
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::verify($_POST['csrf_token'] ?? null)) {
+    $_SESSION['flash'] = ['type' => 'error', 'text' => 'Your session expired. Please try again.'];
+    header('Location: /users');
+    exit;
+}
+
+$userId = (int) ($_POST['user_id'] ?? 0);
+$status = $_POST['status'] ?? '';
+
+if ($userId === Auth::id()) {
+    $_SESSION['flash'] = ['type' => 'error', 'text' => 'You cannot change your own account status.'];
+} elseif ($userId && User::setStatus($userId, $status)) {
+    Audit::log(Auth::id(), 'user_status_change', 'users', $userId, null, ['status' => $status]);
+    $_SESSION['flash'] = ['type' => 'success', 'text' => 'Account status updated.'];
+} else {
+    $_SESSION['flash'] = ['type' => 'error', 'text' => 'Could not update that account.'];
+}
+
+header('Location: /users');
+exit;
