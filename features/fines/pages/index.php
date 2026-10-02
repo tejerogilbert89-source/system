@@ -8,8 +8,11 @@
 $layout = 'staff';
 Auth::requireRole(['librarian']);
 
-$q      = trim($_GET['q'] ?? '');
-$filter = in_array($_GET['f'] ?? '', ['unpaid', 'settled'], true) ? $_GET['f'] : 'all';
+// ?q[]=x / ?f[]=x (tampered URLs) must not crash the page - non-strings are ignored.
+$rawQ   = $_GET['q'] ?? '';
+$rawF   = $_GET['f'] ?? '';
+$q      = is_string($rawQ) ? Fine::cleanText($rawQ, 100) : '';
+$filter = (is_string($rawF) && in_array($rawF, ['unpaid', 'settled'], true)) ? $rawF : 'all';
 
 $summary = Fine::summary();
 $rows    = Fine::patrons($q, $filter);
@@ -19,6 +22,7 @@ unset($_SESSION['flash']);
 
 $tabs = ['all' => 'All', 'unpaid' => 'Unpaid', 'settled' => 'Settled'];
 $qs = fn(string $f) => '?f=' . $f . ($q !== '' ? '&q=' . urlencode($q) : '');
+$token = Fine::pageToken();   // one-time token for every form on this page
 ?>
 <h1>Fines</h1>
 <p class="muted">Overdue fines are charged automatically when a late item is returned.</p>
@@ -45,7 +49,7 @@ $qs = fn(string $f) => '?f=' . $f . ($q !== '' ? '&q=' . urlencode($q) : '');
 <div class="section-heading">
     <div>
         <?php foreach ($tabs as $key => $label): ?>
-            <a href="<?= $qs($key) ?>"><?= $filter === $key ? "<strong>{$label}</strong>" : $label ?></a>
+            <a href="<?= htmlspecialchars($qs($key)) ?>"><?= $filter === $key ? "<strong>{$label}</strong>" : $label ?></a>
             <?= $key !== array_key_last($tabs) ? ' &middot; ' : '' ?>
         <?php endforeach; ?>
     </div>
@@ -59,11 +63,11 @@ $qs = fn(string $f) => '?f=' . $f . ($q !== '' ? '&q=' . urlencode($q) : '');
 
 <table>
     <thead>
-        <tr><th>Patron</th><th>Category</th><th>Charged</th><th>Paid</th><th>Balance</th><th></th></tr>
+        <tr><th>Patron</th><th>Category</th><th>Charged</th><th>Paid</th><th>Waived</th><th>Balance</th><th></th></tr>
     </thead>
     <tbody>
         <?php if (!$rows): ?>
-            <tr><td colspan="6" class="muted">No matching fine history.</td></tr>
+            <tr><td colspan="7" class="muted">No matching fine history.</td></tr>
         <?php endif; ?>
         <?php foreach ($rows as $r): ?>
             <?php $balance = (float) $r['balance']; ?>
@@ -77,6 +81,7 @@ $qs = fn(string $f) => '?f=' . $f . ($q !== '' ? '&q=' . urlencode($q) : '');
                 <td><?= htmlspecialchars($r['category_name'] ?? '—') ?></td>
                 <td><?= number_format((float) $r['charged'], 2) ?></td>
                 <td><?= number_format((float) $r['paid'], 2) ?></td>
+                <td><?= number_format((float) $r['waived'], 2) ?></td>
                 <td>
                     <?= number_format($balance, 2) ?>
                     <?php if ($balance > 0.001): ?>
@@ -89,8 +94,10 @@ $qs = fn(string $f) => '?f=' . $f . ($q !== '' ? '&q=' . urlencode($q) : '');
                     <?php if ($balance > 0.001): ?>
                         <form method="post" action="/fines/pay" style="display:inline;">
                             <?= Csrf::field() ?>
+                            <input type="hidden" name="req_id" value="<?= htmlspecialchars($token) ?>">
                             <input type="hidden" name="user_id" value="<?= (int) $r['user_id'] ?>">
                             <input type="hidden" name="full" value="1">
+                            <input type="hidden" name="expected" value="<?= number_format($balance, 2, '.', '') ?>">
                             <input type="hidden" name="back" value="/fines<?= htmlspecialchars($qs($filter)) ?>">
                             <button type="submit" class="btn btn-ghost">Pay full (<?= number_format($balance, 2) ?>)</button>
                         </form>

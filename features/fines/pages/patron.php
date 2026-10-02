@@ -7,7 +7,8 @@
 $layout = 'staff';
 Auth::requireRole(['librarian']);
 
-$userId = (int) ($_GET['user_id'] ?? 0);
+// Strict integer: "?user_id[]=2" or "?user_id=1abc" must not be coerced into user 1.
+$userId = Fine::parseId($_GET['user_id'] ?? null);
 $patron = $userId ? Fine::patronInfo($userId) : null;
 
 if (!$patron) {
@@ -17,6 +18,7 @@ if (!$patron) {
 }
 
 $balance = Fine::balanceFor($userId);
+$token   = Fine::pageToken();   // one-time token for the forms on this page
 $ledger  = Fine::ledgerFor($userId);
 
 $flash = $_SESSION['flash'] ?? null;
@@ -50,11 +52,12 @@ $typeLabels = [
     </div>
 </div>
 
-<?php if ($balance > 0.001): ?>
+<?php if ($balance >= 0.01): ?>
 <div class="card" style="max-width: 480px;">
     <h3>Record a payment</h3>
     <form method="post" action="/fines/pay">
         <?= Csrf::field() ?>
+        <input type="hidden" name="req_id" value="<?= htmlspecialchars($token) ?>">
         <input type="hidden" name="user_id" value="<?= (int) $userId ?>">
         <input type="hidden" name="back" value="/fines/patron?user_id=<?= (int) $userId ?>">
         <label>
@@ -73,6 +76,7 @@ $typeLabels = [
     <h3>Waive a balance</h3>
     <form method="post" action="/fines/waive">
         <?= Csrf::field() ?>
+        <input type="hidden" name="req_id" value="<?= htmlspecialchars($token) ?>">
         <input type="hidden" name="user_id" value="<?= (int) $userId ?>">
         <input type="hidden" name="back" value="/fines/patron?user_id=<?= (int) $userId ?>">
         <label>
@@ -102,7 +106,8 @@ $typeLabels = [
         <?php foreach ($ledger as $t): ?>
             <?php [$label, $badgeClass] = $typeLabels[$t['type']] ?? [ucfirst($t['type']), 'badge-out']; ?>
             <tr>
-                <td><?= htmlspecialchars(date('M j, Y g:i A', strtotime($t['created_at']))) ?></td>
+                <?php $ts = strtotime((string) $t['created_at']); ?>
+                <td><?= $ts ? htmlspecialchars(date('M j, Y g:i A', $ts)) : '—' ?></td>
                 <td><span class="badge <?= $badgeClass ?>"><?= $label ?></span></td>
                 <td><?= htmlspecialchars($t['description'] ?? '—') ?></td>
                 <td><?= number_format((float) $t['amount'], 2) ?></td>

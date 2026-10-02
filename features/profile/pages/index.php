@@ -44,6 +44,14 @@ function currentPasswordHash(PDO $pdo, int $userId): string
 $error   = null;
 $success = null;
 
+// Password-change limits. The cap on the new password stops someone from
+// making the server hash a megabyte-sized "password"; the throttle slows
+// down guessing of the current password from a hijacked/unattended session.
+const PW_MAX_LENGTH   = 128;
+const PW_MAX_CURRENT  = 4096;
+const PW_MAX_FAILS    = 5;
+const PW_LOCK_SECONDS = 300;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!Csrf::verify($_POST['csrf_token'] ?? null)) {
         $error = 'Your session expired. Please try again.';
@@ -51,28 +59,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $current = $_POST['current_password'] ?? '';
         $new     = $_POST['new_password']     ?? '';
         $confirm = $_POST['confirm_password'] ?? '';
-        $hash    = currentPasswordHash($pdo, $me['id']);
 
-        if ($current === '' || $new === '' || $confirm === '') {
+        if ((int) ($_SESSION['pw_lock_until'] ?? 0) > time()) {
+            $error = 'Too many wrong attempts. Please wait a few minutes and try again.';
+        } elseif (!is_string($current) || !is_string($new) || !is_string($confirm)) {
+            // Tampered form (e.g. "new_password[]=x") - would crash password_verify().
+            $error = 'Something was wrong with the form. Please try again.';
+        } elseif ($current === '' || $new === '' || $confirm === '') {
             $error = 'Fill in every field before saving.';
         } elseif (strlen($new) < 8) {
             $error = 'The new password needs at least 8 characters.';
+        } elseif (strlen($new) > PW_MAX_LENGTH) {
+            $error = 'The new password can be at most ' . PW_MAX_LENGTH . ' characters.';
         } elseif ($new !== $confirm) {
             $error = 'The two new passwords do not match. Type them again.';
         } elseif ($new === $me['id_number']) {
             $error = 'The new password cannot be your ID number. Pick something else.';
-        } elseif (!password_verify($current, $hash)) {
-            $error = 'The current password is wrong.';
-        } elseif (password_verify($new, $hash)) {
-            $error = 'That is already your current password. Pick a different one.';
         } else {
-            $newHash = password_hash($new, PASSWORD_ARGON2ID);
-            $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-                ->execute([$newHash, $me['id']]);
+            $hash = currentPasswordHash($pdo, (int) $me['id']);
 
-            Audit::log(Auth::id(), 'password_change', 'users', $me['id']);
+            if (strlen($current) > PW_MAX_CURRENT || !password_verify($current, $hash)) {
+                $_SESSION['pw_fails'] = (int) ($_SESSION['pw_fails'] ?? 0) + 1;
+                if ($_SESSION['pw_fails'] >= PW_MAX_FAILS) {
+                    $_SESSION['pw_lock_until'] = time() + PW_LOCK_SECONDS;
+                    $_SESSION['pw_fails']      = 0;
+                }
+                $error = 'The current password is wrong.';
+            } elseif (password_verify($new, $hash)) {
+                $error = 'That is already your current password. Pick a different one.';
+            } else {
+                $newHash = password_hash($new, PASSWORD_ARGON2ID);
+                $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+                    ->execute([$newHash, $me['id']]);
 
-            $success = 'Password changed. Use the new one next time you log in.';
+                Audit::log(Auth::id(), 'password_change', 'users', $me['id']);
+
+                unset($_SESSION['pw_fails'], $_SESSION['pw_lock_until']);
+                // New credentials -> new session id, so a stolen old session id is useless.
+                if (session_status() === PHP_SESSION_ACTIVE) {
+                    session_regenerate_id(true);
+                }
+
+                $success = 'Password changed. Use the new one next time you log in.';
+            }
         }
     }
 }
@@ -237,25 +266,25 @@ function floatingBook(string $top, string $left, int $size, float $delay, float 
             <p class="muted"><?= htmlspecialchars($success) ?></p>
         <?php endif; ?>
 
-        <form method="post" action="/profile" autocomplete="off">
+        <form method="post" action="/profile">
             <?= Csrf::field() ?>
 
             <label class="pw-field">
                 Current password
-                <input type="password" name="current_password" id="pw-current" required>
+                <input type="password" name="current_password" id="pw-current" autocomplete="current-password" required>
                 <button type="button" class="pw-toggle" data-target="pw-current">Show</button>
             </label>
 
             <label class="pw-field">
                 New password
-                <input type="password" name="new_password" id="pw-new" required minlength="8">
+                <input type="password" name="new_password" id="pw-new" autocomplete="new-password" required minlength="8" maxlength="128">
                 <button type="button" class="pw-toggle" data-target="pw-new">Show</button>
             </label>
             <p class="muted pw-hint">At least 8 characters, and not your ID number.</p>
 
             <label class="pw-field">
                 Repeat new password
-                <input type="password" name="confirm_password" id="pw-confirm" required minlength="8">
+                <input type="password" name="confirm_password" id="pw-confirm" autocomplete="new-password" required minlength="8" maxlength="128">
                 <button type="button" class="pw-toggle" data-target="pw-confirm">Show</button>
             </label>
 

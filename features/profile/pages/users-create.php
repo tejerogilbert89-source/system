@@ -2,7 +2,13 @@
 /** POST handler for creating a new account (any role). */
 Auth::requireRole(['admin']);
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !Csrf::verify($_POST['csrf_token'] ?? null)) {
+// Opening this URL directly (GET) is not an error worth a message - just go back.
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: /users');
+    exit;
+}
+
+if (!Csrf::verify($_POST['csrf_token'] ?? null)) {
     $_SESSION['flash'] = ['type' => 'error', 'text' => 'Your session expired. Please try again.'];
     header('Location: /users');
     exit;

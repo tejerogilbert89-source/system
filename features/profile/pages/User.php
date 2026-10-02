@@ -9,7 +9,8 @@
  *   - patron              -> exactly 7 digits
  *   - librarian and admin -> exactly 5 digits
  * That length is enforced here, at creation, since this is the only place
- * accounts get made.
+ * accounts get made. Roles that are not listed below cannot be created
+ * (fail closed) - they never silently fall back to another role's length.
  */
 class User
 {
@@ -19,14 +20,23 @@ class User
         'admin'     => 5,
     ];
 
+    /** Column limits - checked here so the admin gets a clear message instead of a DB error. */
+    private const MAX_FULL_NAME = 150;
+    private const MAX_EMAIL     = 150;
+    private const MAX_PROGRAM   = 100;
+    private const MAX_YEAR      = 20;
+    private const MAX_CONTACT   = 30;
+
+    /** Required ID length for a role, or 0 if the role is not a known/creatable one. */
     public static function idLength(string $roleName): int
     {
-        return self::ID_LENGTH[$roleName] ?? 5;
+        return self::ID_LENGTH[strtolower($roleName)] ?? 0;
     }
 
     public static function idHint(string $roleName): string
     {
-        return 'Exactly ' . self::idLength($roleName) . ' digits.';
+        $len = self::idLength($roleName);
+        return $len > 0 ? 'Exactly ' . $len . ' digits.' : 'This role cannot be created here.';
     }
 
     /** All roles, for a <select>. */
@@ -35,6 +45,15 @@ class User
         return Database::connection()
             ->query('SELECT id, name FROM roles ORDER BY id')
             ->fetchAll();
+    }
+
+    /** Only the roles that have an ID-length rule - these are the ones the form offers. */
+    public static function creatableRoles(): array
+    {
+        return array_values(array_filter(
+            self::roles(),
+            static fn(array $r): bool => self::idLength((string) $r['name']) > 0
+        ));
     }
 
     /** All patron categories, for a <select> shown only when role = patron. */
@@ -60,6 +79,22 @@ class User
     }
 
     /**
+     * A trimmed string from submitted data. Anything that is not a plain
+     * string/number (e.g. a tampered "field[]=x" array) becomes '' instead
+     * of crashing trim() with a TypeError.
+     */
+    private static function text(array $data, string $key): string
+    {
+        $v = $data[$key] ?? '';
+        return (is_string($v) || is_int($v)) ? trim((string) $v) : '';
+    }
+
+    private static function length(string $s): int
+    {
+        return function_exists('mb_strlen') ? mb_strlen($s, 'UTF-8') : strlen($s);
+    }
+
+    /**
      * Creates a new account. The starting password is always the ID
      * number itself - the account holder changes it later from My Profile.
      */
@@ -67,7 +102,8 @@ class User
     {
         $pdo = Database::connection();
 
-        $roleId = (int) ($data['role_id'] ?? 0);
+        $rawRole = $data['role_id'] ?? 0;
+        $roleId  = is_string($rawRole) || is_int($rawRole) ? (int) $rawRole : 0;
         $roleStmt = $pdo->prepare('SELECT name FROM roles WHERE id = ?');
         $roleStmt->execute([$roleId]);
         $roleName = $roleStmt->fetchColumn();
@@ -75,13 +111,22 @@ class User
         if (!$roleName) {
             return ['ok' => false, 'error' => 'Choose a role.'];
         }
-
-        $idNumber = trim($data['id_number'] ?? '');
-        $fullName = trim($data['full_name'] ?? '');
-        $email    = trim($data['email'] ?? '');
+        $roleName = strtolower((string) $roleName);
 
         $requiredLen = self::idLength($roleName);
-        if (!preg_match('/^\d{' . $requiredLen . '}$/', $idNumber)) {
+        if ($requiredLen === 0) {
+            return ['ok' => false, 'error' => 'Accounts with that role cannot be created here.'];
+        }
+
+        $idNumber = self::text($data, 'id_number');
+        $fullName = self::text($data, 'full_name');
+        $email    = self::text($data, 'email');
+        $program  = self::text($data, 'program');
+        $year     = self::text($data, 'year_level');
+        $contact  = self::text($data, 'contact_number');
+
+        // \A...\z: ASCII digits only, exact length, no trailing-newline loophole.
+        if (!preg_match('/\A\d{' . $requiredLen . '}\z/', $idNumber)) {
             return [
                 'ok' => false,
                 'error' => ucfirst($roleName) . " ID numbers must be exactly {$requiredLen} digits.",
@@ -90,6 +135,14 @@ class User
 
         if ($fullName === '') {
             return ['ok' => false, 'error' => 'Enter the full name.'];
+        }
+        if (self::length($fullName) > self::MAX_FULL_NAME) {
+            return ['ok' => false, 'error' => 'The full name is too long (max ' . self::MAX_FULL_NAME . ' characters).'];
+        }
+        if ($email !== '') {
+            if (self::length($email) > self::MAX_EMAIL || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                return ['ok' => false, 'error' => 'Enter a valid email address, or leave it blank.'];
+            }
         }
 
         $dupe = $pdo->prepare('SELECT COUNT(*) FROM users WHERE id_number = ?');
@@ -100,9 +153,24 @@ class User
 
         $categoryId = null;
         if ($roleName === 'patron') {
-            $categoryId = (int) ($data['patron_category_id'] ?? 0);
+            $rawCat     = $data['patron_category_id'] ?? 0;
+            $categoryId = is_string($rawCat) || is_int($rawCat) ? (int) $rawCat : 0;
             if ($categoryId <= 0) {
                 return ['ok' => false, 'error' => 'Choose a patron category.'];
+            }
+            $catStmt = $pdo->prepare('SELECT COUNT(*) FROM patron_categories WHERE id = ?');
+            $catStmt->execute([$categoryId]);
+            if ((int) $catStmt->fetchColumn() === 0) {
+                return ['ok' => false, 'error' => 'That patron category does not exist. Choose one from the list.'];
+            }
+            if (self::length($program) > self::MAX_PROGRAM) {
+                return ['ok' => false, 'error' => 'Program / department is too long (max ' . self::MAX_PROGRAM . ' characters).'];
+            }
+            if (self::length($year) > self::MAX_YEAR) {
+                return ['ok' => false, 'error' => 'Year level is too long (max ' . self::MAX_YEAR . ' characters).'];
+            }
+            if (self::length($contact) > self::MAX_CONTACT) {
+                return ['ok' => false, 'error' => 'Contact number is too long (max ' . self::MAX_CONTACT . ' characters).'];
             }
         }
 
@@ -125,15 +193,25 @@ class User
                 )->execute([
                     $userId,
                     $categoryId,
-                    trim($data['program'] ?? '') ?: null,
-                    trim($data['year_level'] ?? '') ?: null,
-                    trim($data['contact_number'] ?? '') ?: null,
+                    $program ?: null,
+                    $year ?: null,
+                    $contact ?: null,
                 ]);
             }
 
             $pdo->commit();
         } catch (Throwable $e) {
-            $pdo->rollBack();
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            error_log('User::create failed: ' . $e->getMessage());
+
+            // Two admins creating the same ID at the same moment both pass the
+            // check above; the UNIQUE index catches the loser - say so plainly.
+            $dupe->execute([$idNumber]);
+            if ((int) $dupe->fetchColumn() > 0) {
+                return ['ok' => false, 'error' => 'That ID number is already in use.'];
+            }
             return ['ok' => false, 'error' => 'Could not create the account. Please try again.'];
         }
 
@@ -145,12 +223,21 @@ class User
         ];
     }
 
+    /** Returns false for an unknown status value or a user that does not exist. */
     public static function setStatus(int $userId, string $status): bool
     {
         if (!in_array($status, ['active', 'suspended', 'inactive'], true)) {
             return false;
         }
-        $stmt = Database::connection()->prepare('UPDATE users SET status = ? WHERE id = ?');
+        $pdo = Database::connection();
+
+        $exists = $pdo->prepare('SELECT 1 FROM users WHERE id = ?');
+        $exists->execute([$userId]);
+        if (!$exists->fetchColumn()) {
+            return false;
+        }
+
+        $stmt = $pdo->prepare('UPDATE users SET status = ? WHERE id = ?');
         return $stmt->execute([$status, $userId]);
     }
 }

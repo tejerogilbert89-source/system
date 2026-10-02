@@ -11,7 +11,7 @@ $layout = 'staff';
 Auth::requireRole(['admin']);
 
 $users      = User::all(Auth::id());
-$roles      = User::roles();
+$roles      = User::creatableRoles();
 $categories = User::patronCategories();
 
 $flash = $_SESSION['flash'] ?? null;
@@ -46,7 +46,7 @@ unset($_SESSION['flash']);
 
         <label>
             ID number
-            <input type="text" name="id_number" id="id-number" inputmode="numeric" pattern="\d*" required>
+            <input type="text" name="id_number" id="id-number" inputmode="numeric" pattern="\d*" autocomplete="off" required>
         </label>
         <p class="muted" id="id-hint" style="margin-top: -0.75em; font-size: 0.85em;">Pick a role first.</p>
 
@@ -63,7 +63,7 @@ unset($_SESSION['flash']);
         <div id="patron-fields" hidden>
             <label>
                 Patron category
-                <select name="patron_category_id">
+                <select name="patron_category_id" id="patron-category">
                     <option value="">Choose a category&hellip;</option>
                     <?php foreach ($categories as $cat): ?>
                         <option value="<?= (int) $cat['id'] ?>"><?= htmlspecialchars($cat['name']) ?></option>
@@ -135,30 +135,46 @@ unset($_SESSION['flash']);
 <script>
 (function () {
     var idLengths = {};
-    <?php foreach (\User::roles() as $role): ?>
-        idLengths[<?= json_encode($role['id']) ?>] = <?= (int) \User::idLength($role['name']) ?>;
+    <?php foreach ($roles as $role): ?>
+        idLengths[<?= json_encode((string) $role['id']) ?>] = <?= (int) \User::idLength($role['name']) ?>;
     <?php endforeach; ?>
 
-    var roleSelect   = document.getElementById('role-select');
-    var idInput      = document.getElementById('id-number');
-    var idHint       = document.getElementById('id-hint');
-    var patronFields = document.getElementById('patron-fields');
+    var roleSelect    = document.getElementById('role-select');
+    var idInput       = document.getElementById('id-number');
+    var idHint        = document.getElementById('id-hint');
+    var patronFields  = document.getElementById('patron-fields');
+    var patronCat     = document.getElementById('patron-category');
 
     function isPatronSelected() {
         var opt = roleSelect.options[roleSelect.selectedIndex];
-        return !!opt && opt.getAttribute('data-role-name') === 'patron';
+        return !!opt && (opt.getAttribute('data-role-name') || '').toLowerCase() === 'patron';
     }
 
-    roleSelect.addEventListener('change', function () {
+    // Runs on change AND once on load (browsers restore a previously chosen
+    // role after Back/refresh without firing "change").
+    function sync() {
         var len = idLengths[roleSelect.value];
         if (len) {
+            // Exact length enforced by the browser too, not just the server.
             idInput.setAttribute('maxlength', len);
+            idInput.setAttribute('minlength', len);
+            idInput.setAttribute('pattern', '\\d{' + len + '}');
+            idInput.setAttribute('title', 'Exactly ' + len + ' digits (numbers only).');
             idHint.textContent = 'Exactly ' + len + ' digits.';
         } else {
             idInput.removeAttribute('maxlength');
+            idInput.removeAttribute('minlength');
+            idInput.setAttribute('pattern', '\\d*');
+            idInput.removeAttribute('title');
             idHint.textContent = 'Pick a role first.';
         }
-        patronFields.hidden = !isPatronSelected();
-    });
+        var patron = isPatronSelected();
+        patronFields.hidden = !patron;
+        // A hidden "required" field would block the form with no visible error.
+        patronCat.required = patron;
+    }
+
+    roleSelect.addEventListener('change', sync);
+    sync();
 }());
 </script>
